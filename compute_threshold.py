@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-# compute_threshold.py
-
 import os
 import numpy as np
 import torch
@@ -10,11 +8,11 @@ from util.args_loader import get_args
 from util.data_loader  import get_loader_in
 from util.model_loader import get_model
 
-# ─── pick device: CUDA → CPU ─────────────────────────────────────────────────
+# pick device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"[compute_threshold] running on {device}\n")
 
-# ─── parse args & seeds ──────────────────────────────────────────────────────
+# parse args & seeds
 args = get_args()
 os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
 torch.manual_seed(1)
@@ -22,20 +20,13 @@ if device.type == "cuda":
     torch.cuda.manual_seed_all(1)
 np.random.seed(1)
 
-# ─── forward threshold wrapper ───────────────────────────────────────────────
-def forward_fun(args):
-    def forward_threshold(inputs, model):
-        if args.model_arch == 'mobilenet':
-            return model.forward(inputs, threshold=args.threshold)
-        elif 'resnet' in args.model_arch or args.model_arch == 'fno1d':
-            return model.forward_threshold(inputs, threshold=args.threshold)
-        else:
-            return model(inputs)
-    return forward_threshold
+# hook helper for CNNs
+activation = {}
+def get_activation(name):
+    def hook(model, input, output):
+        activation[name] = output.detach()
+    return hook
 
-forward_threshold = forward_fun(args)
-
-# ─── main loop ───────────────────────────────────────────────────────────────
 def eval_ood_detector(args):
     out_dir = os.path.join(args.base_dir, args.in_dataset, args.method, args.name)
     os.makedirs(out_dir, exist_ok=True)
@@ -58,11 +49,23 @@ def eval_ood_detector(args):
         inputs = inputs.to(device)
         with torch.no_grad():
             if args.model_arch == 'fno1d':
-                feats = forward_threshold(inputs, model)  # (B, seq_len)
+                # RAW forward (no clamp)
+                feats = model(inputs)        # (B, seq_len)
                 arr   = feats.cpu().numpy()
             else:
-                # … your existing CNN hooking logic here, using inputs.to(device) …
-                raise NotImplementedError("Add avgpool hooking for CNNs")
+                # CNN raw forward + avgpool hook
+                handles = []
+                if hasattr(model, 'avgpool'):
+                    handles.append(model.avgpool.register_forward_hook(
+                        get_activation('feat')
+                    ))
+                _ = model(inputs)
+                for h in handles:
+                    h.remove()
+                feat = activation['feat']   # (B, C, H, W) or (B, C, L)
+                a = feat.cpu().numpy()
+                B, C = a.shape[0], a.shape[1]
+                arr = a.reshape(B, C, -1).mean(axis=2)
 
             activation_log.append(arr)
 
