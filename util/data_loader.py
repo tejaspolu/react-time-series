@@ -50,8 +50,8 @@ class RK4Dataset(Dataset):
     """Wrap your .npy containing {'prediction', 'Truth', ...} for OOD thresholding."""
     def __init__(self, npy_file, skip=1):
         data = np.load(npy_file, allow_pickle=True).item()
-        self.pred  = data['prediction'][::skip]
-        self.truth = data['Truth'][::skip]
+        self.pred  = data['prediction'][::skip]   # shape (T, L)
+        self.truth = data['Truth'][::skip]        # shape (T, L)
 
     def __len__(self):
         return len(self.pred)
@@ -62,35 +62,113 @@ class RK4Dataset(Dataset):
 
 
 def get_loader_in(args, config_type='default', split=('train', 'val')):
-    # … your existing get_loader_in code unchanged …
-    # (includes RK4Dataset branch for in_dataset='rk4')
-    ...
+    # allow split='val' shorthand
+    if isinstance(split, str):
+        split = (split,)
 
-
-def get_loader_out(args, dataset=(''), config_type='default', split=('train', 'val')):
-    """
-    dataset: tuple (in_dataset, out_dataset).  E.g. ('rk4','noise_series')
-    """
     config = EasyDict({
         "default": {
             'transform_train':        transform_train,
             'transform_test':         transform_test,
             'transform_train_largescale': transform_train_largescale,
             'transform_test_largescale':  transform_test_largescale,
-            'batch_size':             args.batch_size
+            'batch_size':             args.batch_size,
+        },
+    })[config_type]
+
+    train_loader = None
+    val_loader   = None
+    num_classes  = 0
+    lr_schedule  = [50, 75, 90]
+
+    # CIFAR-10
+    if args.in_dataset == "CIFAR-10":
+        num_classes = 10
+        if 'train' in split:
+            ds = torchvision.datasets.CIFAR10('./data', train=True, download=True,
+                                              transform=config.transform_train)
+            train_loader = DataLoader(ds, batch_size=args.batch_size,
+                                      shuffle=True, **kwargs)
+        if 'val' in split:
+            ds = torchvision.datasets.CIFAR10('./data', train=False, download=True,
+                                              transform=transform_test)
+            val_loader = DataLoader(ds, batch_size=args.batch_size,
+                                    shuffle=False, **kwargs)
+
+    # CIFAR-100
+    elif args.in_dataset == "CIFAR-100":
+        num_classes = 100
+        if 'train' in split:
+            ds = torchvision.datasets.CIFAR100('./data', train=True, download=True,
+                                               transform=config.transform_train)
+            train_loader = DataLoader(ds, batch_size=args.batch_size,
+                                      shuffle=True, **kwargs)
+        if 'val' in split:
+            ds = torchvision.datasets.CIFAR100('./data', train=False, download=True,
+                                               transform=transform_test)
+            val_loader = DataLoader(ds, batch_size=args.batch_size,
+                                    shuffle=False, **kwargs)
+
+    # ImageNet
+    elif args.in_dataset.lower() == "imagenet":
+        root = 'datasets/id_data/imagenet'
+        num_classes = 1000
+        if 'train' in split:
+            ds = torchvision.datasets.ImageFolder(os.path.join(root, 'train'),
+                                                  transform=config.transform_train_largescale)
+            train_loader = DataLoader(ds, batch_size=args.batch_size,
+                                      shuffle=True, **kwargs)
+        if 'val' in split:
+            ds = torchvision.datasets.ImageFolder(os.path.join(root, 'val'),
+                                                  transform=config.transform_test_largescale)
+            val_loader = DataLoader(ds, batch_size=args.batch_size,
+                                    shuffle=False, **kwargs)
+
+    # RK4 time‑series
+    elif args.in_dataset.lower() == 'rk4':
+        num_classes = None
+        ds = RK4Dataset(args.input_file, skip=getattr(args, 'skip', 1))
+        if 'val' in split:
+            val_loader = DataLoader(ds, batch_size=args.batch_size,
+                                    shuffle=False, **kwargs)
+
+    else:
+        raise ValueError(f"Unsupported in_dataset: {args.in_dataset}")
+
+    return EasyDict({
+        "train_loader": train_loader,
+        "val_loader":   val_loader,
+        "lr_schedule":  lr_schedule,
+        "num_classes":  num_classes,
+    })
+
+
+def get_loader_out(args, dataset=('',''), config_type='default', split=('train', 'val')):
+    # allow split='val' shorthand
+    if isinstance(split, str):
+        split = (split,)
+
+    config = EasyDict({
+        "default": {
+            'transform_train':        transform_train,
+            'transform_test':         transform_test,
+            'transform_train_largescale': transform_train_largescale,
+            'transform_test_largescale':  transform_test_largescale,
+            'batch_size':             args.batch_size,
         },
     })[config_type]
 
     train_ood_loader = None
     val_ood_loader   = None
 
-    # ─── existing image OOD branches ────────────────────────────────────
-    # e.g. SVHN, DTD, CIFAR-100, etc...
-    # (All of your original code for those stays here.)
+    out_name = dataset[1].lower()
 
-    # ─── new: Gaussian‐noise time‐series for 'noise_series' ─────────────
-    if 'val' in split and dataset[1].lower() == 'noise_series':
-        # load ID .npy to get (T, L)
+    # ---- existing image‐OOD branches here ----
+    # e.g. SVHN, DTD, CIFAR-100, etc., exactly as React originally did
+    # (you can leave those unchanged)
+
+    # ---- noise_series time‑series OOD ----
+    if 'val' in split and out_name == 'noise_series':
         data = np.load(args.input_file, allow_pickle=True).item()
         T, L = data['prediction'].shape
 
@@ -101,18 +179,14 @@ def get_loader_out(args, dataset=(''), config_type='default', split=('train', 'v
             def __len__(self):
                 return self.T
             def __getitem__(self, idx):
-                # random normal noise matching length L
                 x = np.random.randn(self.L).astype(np.float32)
-                y = np.zeros(self.L, dtype=np.float32)  # dummy label
+                y = np.zeros(self.L, dtype=np.float32)
                 return (torch.from_numpy(x), torch.from_numpy(y))
 
         ds = NoiseSeriesDataset(T, L)
-        val_ood_loader = DataLoader(ds,
-                                    batch_size=args.batch_size,
-                                    shuffle=False,
-                                    **kwargs)
+        val_ood_loader = DataLoader(ds, batch_size=args.batch_size,
+                                    shuffle=False, **kwargs)
 
-    # ─── fallback: if nothing matched, error out ─────────────────────────
     if val_ood_loader is None:
         raise ValueError(f"Unsupported out_dataset: {dataset[1]}")
 

@@ -44,7 +44,7 @@ def eval_ood_detector(args, mode_args):
     if not os.path.exists(in_save_dir):
         os.makedirs(in_save_dir)
 
-    loader_in_dict = get_loader_in(args, split=('val'))
+    loader_in_dict = get_loader_in(args, split=('val',))
     testloaderIn, num_classes = loader_in_dict.val_loader, loader_in_dict.num_classes
     method_args['num_classes'] = num_classes
     model = get_model(args, num_classes, load_ckpt=True)
@@ -102,7 +102,7 @@ def eval_ood_detector(args, mode_args):
         if not os.path.exists(out_save_dir):
             os.makedirs(out_save_dir)
 
-        testloaderOut = get_loader_out(args, (None, out_dataset), split='val').val_ood_loader
+        testloaderOut = get_loader_out(args, (None, out_dataset), split=('val',)).val_ood_loader
     ###################################Out-of-Distributions#####################################
         t0 = time.time()
         print("Processing out-of-distribution images")
